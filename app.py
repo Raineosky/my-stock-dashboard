@@ -5,31 +5,33 @@ import numpy as np
 import urllib3
 from datetime import datetime
 
-# 關閉 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 1. 頁面配置與手機端 CSS 優化
+# 1. 頁面配置
 st.set_page_config(page_title="台股 AI 診斷站", layout="wide", initial_sidebar_state="collapsed")
+
+# 2. 視覺美化：強化高對比度與診斷框
 st.markdown("""
     <style>
-    /* 調整下拉選單標題的字體與間距 */
-    .stExpander { border: 1px solid #e2e8f0; border-radius: 8px; margin-bottom: 5px; }
-    .stMetric { background-color: #f8fafc; padding: 10px; border-radius: 5px; }
-    h3 { padding-top: 20px; color: #1e293b; }
+    .stApp { background-color: #0f172a; }
+    [data-testid="stExpander"] { background-color: #1e293b; border-radius: 12px; margin-bottom: 10px; border: 1px solid #334155; }
+    .diag-card { background: #334155; padding: 12px; border-radius: 8px; margin: 5px 0; border-left: 4px solid #475569; }
+    .score-item { display: flex; justify-content: space-between; font-size: 0.9rem; color: #cbd5e1; padding: 2px 0; }
+    .score-plus { color: #f87171; font-weight: bold; } /* 紅色代表多頭加分 */
+    .score-minus { color: #4ade80; font-weight: bold; } /* 綠色代表空頭扣分 */
+    h1, h3 { color: #38bdf8 !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# 2. 數據分析核心邏輯
+# 3. 數據與指標邏輯 (TTL 1小時)
 @st.cache_data(ttl=3600)
-def get_full_analysis(symbol):
+def get_analysis(symbol):
     s = f"{symbol.strip().upper()}.TW"
     h = yf.Ticker(s).history(period="2mo")
     if h.empty:
         s = f"{symbol.strip().upper()}.TWO"
         h = yf.Ticker(s).history(period="2mo")
-    
     if not h.empty and len(h) >= 20:
-        # 計算技術指標
         h['MA5'] = h['Close'].rolling(5).mean()
         h['MA20'] = h['Close'].rolling(20).mean()
         h['VMA5'] = h['Volume'].rolling(5).mean()
@@ -40,75 +42,77 @@ def get_full_analysis(symbol):
         return h
     return pd.DataFrame()
 
-# 3. 系統標題
 st.title("📈 台股 AI 智慧監測站")
-st.caption(f"數據自動更新：每日 16:00 | 目前診斷時間：{datetime.now().strftime('%H:%M')}")
+st.caption(f"自動結算：每日 16:00 | 診斷時間：{datetime.now().strftime('%H:%M')}")
 
-# 觀測池清單
 stock_pool = {
     "2330": "台積電", "2317": "鴻海", "2454": "聯發科", "2308": "台達電",
     "3231": "緯創", "2382": "廣達", "2881": "富邦金", "2882": "國泰金",
-    "2603": "長榮", "1519": "華城", "2002": "中鋼", "2409": "友達",
-    "3037": "欣興", "2303": "聯電", "2609": "陽明"
+    "2603": "長榮", "1519": "華城", "2002": "中鋼", "2409": "友達"
 }
 
-# 4. 全自動執行分析並分類
-with st.spinner("正在自動同步數據並計算指標..."):
-    all_data = []
+with st.spinner("AI 正在拆解指標權重..."):
+    results = []
     for code, name in stock_pool.items():
-        hist = get_full_analysis(code)
+        hist = get_analysis(code)
         if not hist.empty:
             c, p = hist.iloc[-1], hist.iloc[-2]
             
-            # --- 權重評分判定 ---
+            # --- AI 評分與拆解邏輯 ---
             score = 50
-            m5, m20, rsi, vol = c['Close'] > c['MA5'], c['Close'] > c['MA20'], c['RSI'], c['Volume'] > c['VMA5'] and c['Close'] > p['Close']
+            details = [("初始基礎分", 50, "neutral")]
             
-            if m5: score += 10
-            if m20: score += 15
-            if rsi < 35: score += 20
-            elif rsi > 75: score -= 15
-            if vol: score += 15
+            # MA5 判定
+            if c['Close'] > c['MA5']:
+                score += 10
+                details.append(("短期(MA5) 站上均線", "+10", "plus"))
+            else:
+                details.append(("短期(MA5) 低於均線", "0", "neutral"))
+                
+            # MA20 判定
+            if c['Close'] > c['MA20']:
+                score += 15
+                details.append(("中期(MA20) 趨勢偏多", "+15", "plus"))
+            else:
+                details.append(("中期(MA20) 趨勢偏弱", "0", "neutral"))
+            
+            # RSI 判定 (捕捉中鋼這類超跌股)
+            if c['RSI'] < 35:
+                score += 20
+                details.append(("RSI 低檔超跌 (反彈預期)", "+20", "plus"))
+            elif c['RSI'] > 75:
+                score -= 15
+                details.append(("RSI 高檔過熱 (回檔風險)", "-15", "minus"))
+            else:
+                details.append((f"RSI 數值: {c['RSI']:.1f}", "0", "neutral"))
+                
+            # 量價判定
+            if c['Volume'] > c['VMA5'] and c['Close'] > p['Close']:
+                score += 15
+                details.append(("量價協同 (攻擊動能)", "+15", "plus"))
+            else:
+                details.append(("量價關係平淡", "0", "neutral"))
             
             prob = max(5, min(95, int(score)))
-            all_data.append({
-                "label": f"【{prob}%】 {code} {name} (價: {c['Close']:.2f})",
-                "prob": prob,
-                "metrics": {
-                    "MA5": "站上均線 (多)" if m5 else "跌破均線 (空)",
-                    "MA20": "月線上方 (強)" if m20 else "月線下方 (弱)",
-                    "RSI": f"{rsi:.2f}",
-                    "量價": "價漲量增 (實)" if vol else "量縮/價跌 (虛)"
-                }
-            })
+            results.append({"label": f"【{prob}%】 {code} {name}", "prob": prob, "breakdown": details, "price": f"{c['Close']:.2f}"})
 
-    if all_data:
-        # 5. 展示區塊：強勢與弱勢垂直排列
-        
-        # --- 看漲強勢區 ---
-        st.subheader("🚀 隔日看漲強勢區 (Top 10)")
-        strong_list = sorted(all_data, key=lambda x: x['prob'], reverse=True)[:10]
-        for item in strong_list:
-            # 使用 Expander 製作下拉選單
-            with st.expander(item['label']):
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("MA5", item['metrics']['MA5'])
-                c2.metric("MA20", item['metrics']['MA20'])
-                c3.metric("RSI", item['metrics']['RSI'])
-                c4.metric("量價", item['metrics']['量價'])
-        
-        st.divider()
-        
-        # --- 看跌弱勢區 ---
-        st.subheader("⚠️ 隔日看跌弱勢區 (Top 10)")
-        # 按得分從低到高排（空頭強度最高）
-        weak_list = sorted(all_data, key=lambda x: x['prob'])[:10]
-        for item in weak_list:
-            # 顯示「下跌機率」標籤
-            bear_label = item['label'].replace(f"【{item['prob']}%】", f"【{100-item['prob']}%】")
-            with st.expander(bear_label):
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("MA5", item['metrics']['MA5'])
-                c2.metric("MA20", item['metrics']['MA20'])
-                c3.metric("RSI", item['metrics']['RSI'])
-                c4.metric("量價", item['metrics']['量價'])
+    if results:
+        # 4. 分區展示
+        for title, is_strong in [("🚀 隔日看漲強勢區", True), ("⚠️ 隔日看跌弱勢區", False)]:
+            st.subheader(title)
+            sorted_list = sorted(results, key=lambda x: x['prob'], reverse=is_strong)[:10]
+            for item in sorted_list:
+                # 標籤顯示
+                display_label = item['label'] if is_strong else item['label'].replace(f"【{item['prob']}%】", f"【{100-item['prob']}%】")
+                with st.expander(f"{display_label} (價: {item['price']})"):
+                    st.markdown("**🔍 AI 評分拆解原因：**")
+                    for d_title, d_val, d_type in item['breakdown']:
+                        color_class = "score-plus" if d_type == "plus" else "score-minus" if d_type == "minus" else ""
+                        st.markdown(f"""
+                            <div class="score-item">
+                                <span>{d_title}</span>
+                                <span class="{color_class}">{d_val}</span>
+                            </div>
+                        """, unsafe_allow_html=True)
+                    st.write("---")
+            st.divider()
